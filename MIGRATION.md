@@ -6,6 +6,8 @@ This project is SlapDesk v0.4, a local-first React 19, TypeScript, Vite 6, and T
 
 The six lane engines are under `src/engine/`. `src/engine/audioEngine.ts` owns the singleton Web Audio context, synth/sample playback, transport, track mix gating, swing scheduling, per-track panning, and retained in-memory sample buffers. `src/engine/midiWriter.ts` writes MIDI; `src/engine/zipExporter.ts` packages MIDI stems and supporting artifacts. `src/components/` contains the DAW views and dialogs. See [ARCHITECTURE.md](ARCHITECTURE.md) for the detailed subsystem map and known boundaries.
 
+Playback swing is a scheduling-only offset: `delay = (60 / BPM / 4) * 0.5 * (clamp(swing, 0, 100) / 100)`. It applies on `stepInBar % 4 === 2` to kick, hats, 808, melody, and keys; snare/clap events remain fixed. Mute and disabled state take precedence; if a track is muted or disabled it stays silent even when soloed. Otherwise, when any track is soloed, only soloed tracks play. Multiple soloed tracks play together.
+
 ## Install and run
 
 From the repository root, install the checked-in Bun lockfile and start the development server:
@@ -42,5 +44,5 @@ Continue in this general order: Studio Kit, saved sessions, cleaner UI, improved
 
 ## Development handoff
 
-- Last completed task: **SlapDesk v0.4 — Playback Fidelity Pass**. Playback now schedules swing without mutating generated events, routes tracks through persistent stereo panners, honors track mix state, cleans up ended voice nodes, and has focused regression tests. The generated MIDI event data and 144 baseline outputs remain unchanged.
+- Last completed task: **SlapDesk v0.4 — Playback Fidelity Pass**. Playback schedules swing without mutating generated events, routes tracks through persistent stereo panners, honors track mix state, cancels stale scheduler/playhead timers and active voices during transport changes, and has focused regression tests. The generated MIDI event data and 144 baseline outputs remain unchanged.
 - Next recommended task: **Studio Kit sample assignment and user-kit management**. Extend the existing local sample-loading path, preserve the generated engines, and keep the implementation ready for saved-session persistence. Do not combine this with a broad UI or generator rewrite.

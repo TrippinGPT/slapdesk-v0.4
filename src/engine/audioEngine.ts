@@ -17,6 +17,9 @@ class AudioEngine {
   private currentStep: number = 0; // 0..127
   private tempo: number = 100;
   private schedulerTimer: number | null = null;
+  private playheadTimers = new Set<number>();
+  private activeSources = new Set<AudioScheduledSourceNode>();
+  private transportGeneration = 0;
   private nextStepTime: number = 0;
   private currentBeatData: BeatData | null = null;
   private customKit: SampleKit = {};
@@ -104,6 +107,8 @@ class AudioEngine {
     this.init();
     if (!this.ctx) return;
 
+    this.cancelScheduledPlayback(true);
+
     this.currentBeatData = beatData;
     this.tempo = beatData.config.bpm;
     this.updateTrackPans(beatData);
@@ -112,27 +117,37 @@ class AudioEngine {
     this.nextStepTime = this.ctx.currentTime + 0.05;
 
     if (this.onPlayStateChange) this.onPlayStateChange(true);
-    this.scheduleLoop();
+    this.scheduleLoop(this.transportGeneration);
   }
 
   public stop() {
+    this.cancelScheduledPlayback(true);
     this.isPlaying = false;
-    if (this.schedulerTimer !== null) {
-      window.clearTimeout(this.schedulerTimer);
-      this.schedulerTimer = null;
-    }
     this.currentStep = 0;
     if (this.onPlayStateChange) this.onPlayStateChange(false);
     if (this.onStepCallback) this.onStepCallback(0, 0);
   }
 
   public pause() {
+    this.cancelScheduledPlayback(true);
     this.isPlaying = false;
+    if (this.onPlayStateChange) this.onPlayStateChange(false);
+  }
+
+  private cancelScheduledPlayback(stopVoices: boolean) {
+    this.transportGeneration++;
     if (this.schedulerTimer !== null) {
       window.clearTimeout(this.schedulerTimer);
       this.schedulerTimer = null;
     }
-    if (this.onPlayStateChange) this.onPlayStateChange(false);
+    for (const timer of this.playheadTimers) window.clearTimeout(timer);
+    this.playheadTimers.clear();
+    if (stopVoices) {
+      for (const source of this.activeSources) {
+        try { source.stop(); } catch { /* A source may have ended between scheduling and cancellation. */ }
+      }
+      this.activeSources.clear();
+    }
   }
 
   public getIsPlaying(): boolean {
@@ -164,8 +179,8 @@ class AudioEngine {
     }
   }
 
-  private scheduleLoop = () => {
-    if (!this.isPlaying || !this.ctx || !this.currentBeatData) return;
+  private scheduleLoop = (generation = this.transportGeneration) => {
+    if (generation !== this.transportGeneration || !this.isPlaying || !this.ctx || !this.currentBeatData) return;
 
     const secondsPerStep = (60 / this.tempo) / 4; // 16th note duration in seconds
     const scheduleAheadTime = 0.15; // Schedule 150ms ahead
@@ -180,17 +195,19 @@ class AudioEngine {
       // Trigger UI callback synchronously or on frame
       const stepDurationMs = secondsPerStep * 1000;
       const delayMs = Math.max(0, (scheduledTime - this.ctx.currentTime) * 1000);
-      window.setTimeout(() => {
-        if (this.isPlaying && this.onStepCallback) {
+      const playheadTimer = window.setTimeout(() => {
+        this.playheadTimers.delete(playheadTimer);
+        if (generation === this.transportGeneration && this.isPlaying && this.onStepCallback) {
           this.onStepCallback(stepToSchedule, bar);
         }
       }, delayMs);
+      this.playheadTimers.add(playheadTimer);
 
       this.nextStepTime += secondsPerStep;
       this.currentStep = (this.currentStep + 1) % 128; // 8 bars * 16 steps = 128
     }
 
-    this.schedulerTimer = window.setTimeout(this.scheduleLoop, 25);
+    this.schedulerTimer = window.setTimeout(() => this.scheduleLoop(generation), 25);
   };
 
   private scheduleStep(step: number, time: number) {
@@ -539,7 +556,11 @@ class AudioEngine {
   }
 
   private releaseNodesWhenEnded(source: AudioScheduledSourceNode, ...nodes: AudioNode[]) {
-    source.onended = () => nodes.forEach(node => node.disconnect());
+    this.activeSources.add(source);
+    source.onended = () => {
+      this.activeSources.delete(source);
+      nodes.forEach(node => node.disconnect());
+    };
   }
 
   private createNoiseBuffer(duration: number): AudioBuffer | null {

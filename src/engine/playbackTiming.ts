@@ -12,6 +12,7 @@ export function swingOffsetSeconds(
   // snare/clap backbeats, and the intervening 16ths remain fixed.
   if (track === 'snare' || stepInBar % 4 !== 2) return 0;
   const amount = Math.max(0, Math.min(100, swing)) / 100;
+  // delay = (60 / BPM / 4) * 0.5 * (swing / 100)
   return ((60 / bpm) / 4) * 0.5 * amount;
 }
 
