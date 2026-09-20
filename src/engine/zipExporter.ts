@@ -5,7 +5,7 @@
 
 import JSZip from 'jszip';
 import { BeatData } from '../types';
-import { generateMidiFile, generateSingleTrackMidi } from './midiWriter';
+import { generateDrumMidi, generateMidiFile, generateMusicMidi, generateSingleTrackMidi } from './midiWriter';
 import { beatToTokens, getPythonDecoderScript, getLlamaFactoryYaml } from './tokenCodec';
 
 export async function exportProjectZip(beatData: BeatData): Promise<Blob> {
@@ -17,33 +17,35 @@ export async function exportProjectZip(beatData: BeatData): Promise<Blob> {
   // 1. Full Multi-Track Type 1 MIDI
   const fullMidiBytes = generateMidiFile(beatData);
   zip.file(`${prefix}_Full_MultiTrack.mid`, fullMidiBytes);
+  zip.file(`${prefix}_Music.mid`, generateMusicMidi(beatData));
+  zip.file(`${prefix}_Drums.mid`, generateDrumMidi(beatData));
 
   // 2. Individual Stems folder
   const stemsFolder = zip.folder('stems');
   if (stemsFolder) {
     stemsFolder.file(
       `01_Melody_PainLoop.mid`,
-      generateSingleTrackMidi(beatData.tracks.melody, bpm)
+      generateSingleTrackMidi(beatData.tracks.melody, bpm, config.swing)
     );
     stemsFolder.file(
       `02_Dark_Keys.mid`,
-      generateSingleTrackMidi(beatData.tracks.keys, bpm)
+      generateSingleTrackMidi(beatData.tracks.keys, bpm, config.swing)
     );
     stemsFolder.file(
       `03_808_Sub_Glides.mid`,
-      generateSingleTrackMidi(beatData.tracks.bass808, bpm)
+      generateSingleTrackMidi(beatData.tracks.bass808, bpm, config.swing)
     );
     stemsFolder.file(
       `04_Kick_Knock.mid`,
-      generateSingleTrackMidi(beatData.tracks.kick, bpm)
+      generateSingleTrackMidi(beatData.tracks.kick, bpm, config.swing)
     );
     stemsFolder.file(
       `05_Clap_Snare.mid`,
-      generateSingleTrackMidi(beatData.tracks.snare, bpm)
+      generateSingleTrackMidi(beatData.tracks.snare, bpm, config.swing)
     );
     stemsFolder.file(
       `06_HiHats_Perc.mid`,
-      generateSingleTrackMidi(beatData.tracks.hihat, bpm)
+      generateSingleTrackMidi(beatData.tracks.hihat, bpm, config.swing)
     );
   }
 

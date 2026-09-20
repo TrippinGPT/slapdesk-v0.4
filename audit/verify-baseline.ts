@@ -10,7 +10,7 @@ import JSZip from 'jszip';
 const scales = ['natural_minor','harmonic_minor','phrygian','dorian'] as const;
 const hashes = JSON.parse(readFileSync(new URL('./before-midi-hashes.json',import.meta.url),'utf8'));
 for (const rootKey of NOTE_NAMES) for (const scale of scales) for (const variation of ['V1','V2','V3'] as const) {
- const bytes = generateMidiFile(generateFullBeat({...createDefaultConfig(123456),rootKey,scale,variation}));
+ const bytes = generateMidiFile(generateFullBeat({...createDefaultConfig(123456),rootKey,scale,variation}),{swing:0});
  assert.equal(createHash('sha256').update(bytes).digest('hex'),hashes[`${rootKey}/${scale}/${variation}`]);
 }
 for (const [flat,sharp] of [['Db','C#'],['Eb','D#'],['Gb','F#'],['Ab','G#'],['Bb','A#']]) for (const scale of scales) {
@@ -18,7 +18,7 @@ for (const [flat,sharp] of [['Db','C#'],['Eb','D#'],['Gb','F#'],['Ab','G#'],['Bb
  assert.deepEqual(getScaleMidiNotes(flat,scale,[1,2]),getScaleMidiNotes(sharp,scale,[1,2]));
  const flatBeat=generateFullBeat({...createDefaultConfig(123456),rootKey:flat,scale});
  const sharpBeat=generateFullBeat({...createDefaultConfig(123456),rootKey:sharp,scale});
- assert.deepEqual(generateMidiFile(flatBeat),generateMidiFile(sharpBeat));
+ assert.deepEqual(generateMidiFile(flatBeat,{swing:0}),generateMidiFile(sharpBeat,{swing:0}));
  for (const n of flatBeat.tracks.bass808.notes) assert.ok(isPitchInScale(n.pitch,flat,scale));
 }
 const qa=await runAutomatedTestSuite(); assert.ok(qa.passed);
@@ -26,8 +26,8 @@ writeFileSync(new URL('./qa-after.json',import.meta.url),JSON.stringify(qa,null,
 const blob=await exportProjectZip(generateFullBeat(createDefaultConfig(123456)));
 const zip=await JSZip.loadAsync(await blob.arrayBuffer());
 const files=Object.values(zip.files).filter(f=>!f.dir);
-assert.equal(files.filter(f=>f.name.endsWith('.mid')).length,7);
-assert.equal(files.length,11);
+assert.equal(files.filter(f=>f.name.endsWith('.mid')).length,9);
+assert.equal(files.length,13);
 // Parse every exported MIDI chunk and event rather than checking only its magic bytes.
 for (const file of files.filter(f=>f.name.endsWith('.mid'))) {
  const b=await file.async('uint8array'); const v=new DataView(b.buffer,b.byteOffset,b.byteLength);
@@ -42,4 +42,4 @@ for (const file of files.filter(f=>f.name.endsWith('.mid'))) {
  }
  assert.equal(p,b.length); assert.ok(noteOns>0);
 }
-console.log('PASS: 144 unchanged MIDI fingerprints; 20 flat/scale equivalence cases; existing 100/300 QA suite; ZIP with 7 parsed MIDI files and 4 supporting files.');
+console.log('PASS: 144 unchanged straight-timing MIDI fingerprints; 20 flat/scale equivalence cases; existing 100/300 QA suite; ZIP with 9 parsed MIDI files and 4 supporting files.');

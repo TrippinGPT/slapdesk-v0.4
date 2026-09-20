@@ -5,6 +5,7 @@
 
 import React, { useState } from 'react';
 import { DawView, ReferenceDNA } from '../types';
+import { SessionSaveStatus } from '../engine/sessionTypes';
 import {
   Play,
   Square,
@@ -51,6 +52,9 @@ interface DawHeaderProps {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onNewCookup: () => void;
+  onOpenSessionLibrary: () => void;
+  onSaveSession: () => void;
+  sessionSaveStatus: SessionSaveStatus;
 }
 
 export const DawHeader: React.FC<DawHeaderProps> = ({
@@ -76,6 +80,9 @@ export const DawHeader: React.FC<DawHeaderProps> = ({
   sidebarOpen,
   onToggleSidebar,
   onNewCookup,
+  onOpenSessionLibrary,
+  onSaveSession,
+  sessionSaveStatus,
 }) => {
   const [loopMode, setLoopMode] = useState(true);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
@@ -122,6 +129,10 @@ export const DawHeader: React.FC<DawHeaderProps> = ({
                     <span>New Cookup</span>
                     <span className="text-[10px] text-zinc-500">Ctrl+N</span>
                   </button>
+                  <button onClick={onSaveSession} className="w-full text-left px-3 py-1.5 hover:bg-zinc-800 hover:text-white flex items-center justify-between">
+                    <span>Save Session</span><span className="text-[10px] text-zinc-500">{sessionSaveStatus === 'saving' ? 'Saving…' : sessionSaveStatus === 'unsaved' ? 'Unsaved' : 'Saved'}</span>
+                  </button>
+                  <button onClick={onOpenSessionLibrary} className="w-full text-left px-3 py-1.5 hover:bg-zinc-800 hover:text-white">Session Library…</button>
                   <button
                     onClick={onDownloadMidi}
                     className="w-full text-left px-3 py-1.5 hover:bg-zinc-800 hover:text-white flex items-center justify-between"

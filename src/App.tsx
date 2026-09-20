@@ -12,6 +12,9 @@ import { generateMidiFile } from './engine/midiWriter';
 import { exportProjectZip } from './engine/zipExporter';
 import { beatToTokens } from './engine/tokenCodec';
 import { CURATED_REFERENCE_TARGETS, ReferenceTarget } from './engine/referenceLibrary';
+import { studioKitService } from './engine/studioKitService';
+import { sessionService } from './engine/sessionService';
+import { SlapDeskSession, SessionSaveStatus, VariationId } from './engine/sessionTypes';
 
 // LMMS DAW Modular Components
 import { DawHeader } from './components/DawHeader';
@@ -28,20 +31,45 @@ import { ReferenceModeModal } from './components/ReferenceModeModal';
 import { TestLabModal } from './components/TestLabModal';
 import { TokenLabModal } from './components/TokenLabModal';
 import { CodeViewerModal } from './components/CodeViewerModal';
+import { SessionLibraryModal } from './components/SessionLibraryModal';
 
 import { Check } from 'lucide-react';
 
 export default function App() {
   // Beat Engine State
   const [config, setConfig] = useState<BeatConfig>(() => createDefaultConfig());
-  const [beatData, setBeatData] = useState<BeatData>(() => generateFullBeat(config));
+  const [beatData, setBeatData] = useState<BeatData>(() => createEmptyBeatData(config));
+  const [isSessionBooting, setIsSessionBooting] = useState(true);
   const [referenceDNA, setReferenceDNA] = useState<ReferenceDNA | undefined>();
+  const [currentSession, setCurrentSession] = useState<SlapDeskSession | null>(null);
+  const [sessionSaveStatus, setSessionSaveStatus] = useState<SessionSaveStatus>('saved');
+  const [sessionLibrary, setSessionLibrary] = useState<SlapDeskSession[]>([]);
+  const [invalidSessionCount, setInvalidSessionCount] = useState(0);
+  const [showSessionLibrary, setShowSessionLibrary] = useState(false);
+  const [sessionKitReference, setSessionKitReference] = useState<string | null>(null);
+  const [studioKitRevision, setStudioKitRevision] = useState(0);
+  const [masterVolume, setMasterVolume] = useState(0.85);
+  const sessionHydratedRef = useRef(false);
+  const skipAutosaveRef = useRef(false);
+  const currentSessionRef = useRef<SlapDeskSession | null>(null);
+  const sessionKitReferenceRef = useRef<string | null>(null);
+  const autosaveTimerRef = useRef<number | null>(null);
+  const latestSnapshotRef = useRef({ config, beatData, masterVolume, referenceDNA: undefined as ReferenceDNA | undefined });
+  const variationSnapshotsRef = useRef<Partial<Record<VariationId, BeatData>>>({ [config.variation]: beatData });
+  currentSessionRef.current = currentSession;
+  sessionKitReferenceRef.current = sessionKitReference;
+  latestSnapshotRef.current = { config, beatData, masterVolume, referenceDNA };
+
+  const generateVariationSet = (nextConfig: BeatConfig, dna?: ReferenceDNA) => ({
+    V1: generateFullBeat({ ...nextConfig, variation: 'V1' }, dna),
+    V2: generateFullBeat({ ...nextConfig, variation: 'V2' }, dna),
+    V3: generateFullBeat({ ...nextConfig, variation: 'V3' }, dna),
+  });
 
   // LMMS DAW Workspace State
   const [activeView, setActiveView] = useState<DawView>('song_editor');
   const [focusedTrack, setFocusedTrack] = useState<TrackType>('melody');
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [masterVolume, setMasterVolume] = useState(0.85);
 
   // Playback State
   const [isPlaying, setIsPlaying] = useState(false);
@@ -67,6 +95,59 @@ export default function App() {
 
   // Connect Web Audio Callbacks
   useEffect(() => {
+    void (async () => {
+      try {
+        await studioKitService.initialize();
+        const saved = await sessionService.getLastOpened();
+        if (saved) {
+          const restored = saved.variations[saved.selectedVariation]!;
+          variationSnapshotsRef.current = saved.variations;
+          skipAutosaveRef.current = true;
+          let missingKit = false;
+          let sampleWarning = false;
+          if (saved.studioKitReference) {
+            try { sampleWarning = (await studioKitService.selectKit(saved.studioKitReference)).length > 0; }
+            catch { missingKit = true; await studioKitService.selectKit(null); }
+          } else {
+            await studioKitService.selectKit(null);
+          }
+          setConfig(saved.generatorSettings);
+          setBeatData(restored);
+          setReferenceDNA(saved.referenceDNA ?? restored.referenceDNA);
+          setMasterVolume(saved.masterVolume);
+          audioEngine.setMasterVolume(saved.masterVolume);
+          setCurrentSession(saved);
+          setSessionKitReference(saved.studioKitReference);
+          if (missingKit) showToast('Session opened; its Studio Kit is missing, so built-in sounds are active.');
+          else if (sampleWarning) showToast('Some saved samples are unavailable; built-in sounds are active for those lanes.');
+        } else {
+          const initialConfig = latestSnapshotRef.current.config;
+          const initialBeat = generateFullBeat(initialConfig);
+          variationSnapshotsRef.current = generateVariationSet(initialConfig);
+          variationSnapshotsRef.current.V1 = initialBeat;
+          setBeatData(initialBeat);
+          const created = await sessionService.saveCurrent(null, {
+            config: initialConfig, beatData: initialBeat, masterVolume: 0.85,
+            studioKitReference: studioKitService.getActiveKitId(),
+            variations: variationSnapshotsRef.current,
+          });
+          skipAutosaveRef.current = true;
+          setCurrentSession(created);
+          setSessionKitReference(created.studioKitReference);
+        }
+        sessionHydratedRef.current = true;
+        setIsSessionBooting(false);
+      } catch (error) {
+        const initialConfig = latestSnapshotRef.current.config;
+        const initialBeat = generateFullBeat(initialConfig);
+        variationSnapshotsRef.current = generateVariationSet(initialConfig);
+        variationSnapshotsRef.current.V1 = initialBeat;
+        setBeatData(initialBeat);
+        sessionHydratedRef.current = true;
+        setIsSessionBooting(false);
+        showToast(error instanceof Error ? `Sessions unavailable: ${error.message}` : 'Sessions unavailable; this cookup is temporary.');
+      }
+    })();
     audioEngine.setCallbacks(
       (step, bar) => {
         setCurrentStep(step);
@@ -81,6 +162,36 @@ export default function App() {
       audioEngine.stop();
     };
   }, []);
+
+  useEffect(() => {
+    variationSnapshotsRef.current = { ...variationSnapshotsRef.current, [config.variation]: beatData };
+  }, [config.variation, beatData]);
+
+  // Persist production changes after a short quiet period. Transport position and audition state are excluded.
+  useEffect(() => {
+    if (!sessionHydratedRef.current || !currentSession?.id) return;
+    if (skipAutosaveRef.current) { skipAutosaveRef.current = false; return; }
+    setSessionSaveStatus('unsaved');
+    const timer = window.setTimeout(() => {
+      autosaveTimerRef.current = null;
+      const active = currentSessionRef.current;
+      const snapshot = latestSnapshotRef.current;
+      setSessionSaveStatus('saving');
+      void sessionService.saveCurrent(active, {
+        config: snapshot.config, beatData: snapshot.beatData, masterVolume: snapshot.masterVolume,
+        referenceDNA: snapshot.referenceDNA, studioKitReference: sessionKitReferenceRef.current,
+        variations: variationSnapshotsRef.current,
+      }).then(saved => {
+        setCurrentSession(saved);
+        setSessionSaveStatus('saved');
+      }).catch(error => {
+        setSessionSaveStatus('unsaved');
+        showToast(error instanceof Error ? `Session autosave failed: ${error.message}` : 'Session autosave failed.');
+      });
+    }, 900);
+    autosaveTimerRef.current = timer;
+    return () => { window.clearTimeout(timer); if (autosaveTimerRef.current === timer) autosaveTimerRef.current = null; };
+  }, [config, beatData, masterVolume, referenceDNA, studioKitRevision, currentSession?.id]);
 
   // Synchronize Audio Engine Beat Data
   useEffect(() => {
@@ -115,6 +226,7 @@ export default function App() {
   }, [isPlaying, beatData]);
 
   const handlePlayToggle = () => {
+    if (isSessionBooting) return;
     if (isPlaying) {
       audioEngine.pause();
     } else {
@@ -160,7 +272,64 @@ export default function App() {
   };
 
   // 1. Cook Fresh Beat
-  const handleNewCookup = () => {
+  const refreshSessionLibrary = async () => {
+    const result = await sessionService.list();
+    setSessionLibrary(result.sessions);
+    setInvalidSessionCount(result.invalidCount);
+  };
+
+  const saveSessionNow = async () => {
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    setSessionSaveStatus('saving');
+    const snapshot = latestSnapshotRef.current;
+    try {
+      const saved = await sessionService.saveCurrent(currentSessionRef.current, {
+        config: snapshot.config, beatData: snapshot.beatData, masterVolume: snapshot.masterVolume,
+        referenceDNA: snapshot.referenceDNA, studioKitReference: sessionKitReferenceRef.current,
+        variations: variationSnapshotsRef.current,
+      });
+      setCurrentSession(saved);
+      setSessionSaveStatus('saved');
+      await refreshSessionLibrary();
+      showToast('Session saved');
+    } catch (error) {
+      setSessionSaveStatus('unsaved');
+      throw error;
+    }
+  };
+
+  const openSession = async (id: string) => {
+    if (currentSessionRef.current && sessionSaveStatus !== 'saved') await saveSessionNow();
+    const saved = await sessionService.load(id);
+    const restored = saved.variations[saved.selectedVariation]!;
+    let missingKit = false;
+    let sampleWarning = false;
+    if (saved.studioKitReference) {
+      try { sampleWarning = (await studioKitService.selectKit(saved.studioKitReference)).length > 0; }
+      catch { missingKit = true; await studioKitService.selectKit(null); }
+    } else await studioKitService.selectKit(null);
+    skipAutosaveRef.current = true;
+    setConfig(saved.generatorSettings);
+    setBeatData(restored);
+    setReferenceDNA(saved.referenceDNA ?? restored.referenceDNA);
+    setMasterVolume(saved.masterVolume);
+    audioEngine.setMasterVolume(saved.masterVolume);
+    setSessionKitReference(saved.studioKitReference);
+    variationSnapshotsRef.current = saved.variations;
+    setCurrentSession(saved);
+    setSessionSaveStatus('saved');
+    setShowSessionLibrary(false);
+    await refreshSessionLibrary();
+    if (missingKit) showToast('Session opened; its Studio Kit is missing, so built-in sounds are active.');
+    else if (sampleWarning) showToast('Some saved samples are unavailable; built-in sounds are active for those lanes.');
+    else showToast(`Opened ${saved.name}`);
+  };
+
+  const handleNewCookup = async () => {
+    if (currentSessionRef.current && sessionSaveStatus !== 'saved') await saveSessionNow();
     const newSeed = Math.floor(Math.random() * 900000 + 100000);
     const newConfig: BeatConfig = {
       ...config,
@@ -171,16 +340,52 @@ export default function App() {
       bassFamilyId: Math.floor(Math.random() * 10) + 1,
       phraseFamilyId: Math.floor(Math.random() * 10) + 1,
     };
-    const newBeat = generateFullBeat(newConfig, referenceDNA);
+    const siblings = generateVariationSet(newConfig, referenceDNA);
+    const newBeat = siblings.V1;
+    variationSnapshotsRef.current = siblings;
     setConfig(newConfig);
     setBeatData(newBeat);
+    const created = await sessionService.saveCurrent(null, {
+      config: newConfig, beatData: newBeat, masterVolume,
+      referenceDNA, studioKitReference: studioKitService.getActiveKitId(),
+      variations: siblings,
+    });
+    setSessionKitReference(created.studioKitReference);
+    setCurrentSession(created);
+    setSessionSaveStatus('saved');
+    skipAutosaveRef.current = true;
     showToast(`Cooked new session (Seed #${newSeed})`);
+    await refreshSessionLibrary();
+  };
+
+  const duplicateSession = async (id: string) => {
+    if (currentSessionRef.current && sessionSaveStatus !== 'saved') await saveSessionNow();
+    const source = await sessionService.load(id);
+    const duplicate = await sessionService.createDuplicate(source);
+    await openSession(duplicate.id);
+    await refreshSessionLibrary();
+    showToast(`Saved copy: ${duplicate.name}`);
+  };
+
+  const renameSession = async (id: string, name: string) => {
+    const renamed = await sessionService.rename(id, name);
+    if (currentSessionRef.current?.id === id) setCurrentSession(renamed);
+    await refreshSessionLibrary();
+  };
+
+  const deleteSession = async (id: string) => {
+    await sessionService.delete(id);
+    if (currentSessionRef.current?.id === id) {
+      setCurrentSession(null);
+      setSessionSaveStatus('unsaved');
+    }
+    await refreshSessionLibrary();
   };
 
   // 2. Targeted Recook
   const handleRecook = (target: 'all' | 'drums' | 'bass808' | 'melody') => {
     if (target === 'all') {
-      handleNewCookup();
+      void handleNewCookup();
       return;
     }
     const targetKey = target === 'melody' ? 'music' : target === 'bass808' ? '808' : 'drums';
@@ -206,7 +411,9 @@ export default function App() {
       rootKey: target.recommendedKey || config.rootKey,
       scale: target.recommendedScale || config.scale,
     };
-    const newBeat = generateFullBeat(newConfig, target);
+    const siblings = generateVariationSet(newConfig, target);
+    const newBeat = siblings[newConfig.variation];
+    variationSnapshotsRef.current = siblings;
     setConfig(newConfig);
     setBeatData(newBeat);
     showToast(`Loaded Producer Reference: ${target.title}`);
@@ -230,7 +437,9 @@ export default function App() {
         rootKey: dna.recommendedKey || config.rootKey,
         scale: dna.recommendedScale || config.scale,
       };
-      const newBeat = generateFullBeat(newConfig, dna);
+      const siblings = generateVariationSet(newConfig, dna);
+      const newBeat = siblings[newConfig.variation];
+      variationSnapshotsRef.current = siblings;
       setConfig(newConfig);
       setBeatData(newBeat);
     }
@@ -281,6 +490,10 @@ export default function App() {
     if (track) setFocusedTrack(track);
   };
 
+  if (isSessionBooting) {
+    return <div className="flex h-screen w-screen items-center justify-center bg-zinc-950 text-xs font-mono text-zinc-400">Restoring local Cookup…</div>;
+  }
+
   return (
     <div className="h-screen w-screen bg-zinc-950 text-zinc-100 flex flex-col selection:bg-amber-500 selection:text-zinc-950 font-sans overflow-hidden">
       {/* Toast Notification */}
@@ -319,6 +532,9 @@ export default function App() {
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         onNewCookup={handleNewCookup}
+        onOpenSessionLibrary={() => { setShowSessionLibrary(true); void refreshSessionLibrary(); }}
+        onSaveSession={() => { void saveSessionNow().catch(error => showToast(error.message)); }}
+        sessionSaveStatus={sessionSaveStatus}
       />
 
       {/* Main DAW Middle Workspace: Sidebar + Active Window */}
@@ -387,7 +603,9 @@ export default function App() {
             <DawGeneratorView
               config={config}
               onConfigChange={newConfig => {
-                const newBeat = generateFullBeat(newConfig, referenceDNA);
+                const siblings = generateVariationSet(newConfig, referenceDNA);
+                const newBeat = siblings[newConfig.variation];
+                variationSnapshotsRef.current = siblings;
                 setConfig(newConfig);
                 setBeatData(newBeat);
               }}
@@ -404,7 +622,29 @@ export default function App() {
       {/* Production Modals */}
       <StudioKitModal
         isOpen={showStudioKit}
-        onClose={() => setShowStudioKit(false)}
+        onClose={() => {
+          setShowStudioKit(false);
+          const activeKitId = studioKitService.getActiveKitId();
+          setSessionKitReference(activeKitId);
+          sessionKitReferenceRef.current = activeKitId;
+          setStudioKitRevision(value => value + 1);
+        }}
+      />
+
+      <SessionLibraryModal
+        isOpen={showSessionLibrary}
+        onClose={() => setShowSessionLibrary(false)}
+        sessions={sessionLibrary}
+        currentSessionId={currentSession?.id ?? null}
+        saveStatus={sessionSaveStatus}
+        invalidCount={invalidSessionCount}
+        onRefresh={refreshSessionLibrary}
+        onOpen={openSession}
+        onNew={handleNewCookup}
+        onSave={saveSessionNow}
+        onDuplicate={duplicateSession}
+        onRename={renameSession}
+        onDelete={deleteSession}
       />
 
       <ReferenceModeModal
@@ -432,4 +672,21 @@ export default function App() {
       />
     </div>
   );
+}
+
+function createEmptyBeatData(config: BeatConfig): BeatData {
+  const names: Record<TrackType, { name: string; channel: number }> = {
+    melody: { name: 'Pain Loop', channel: 0 }, keys: { name: 'Dark Keys & Stabs', channel: 1 },
+    bass808: { name: '808 Sub & Glides', channel: 2 }, kick: { name: 'Punch Kick Knock', channel: 9 },
+    snare: { name: 'Hard Clap & Snare', channel: 9 }, hihat: { name: 'Sizzle Hats & Perc', channel: 9 },
+  };
+  const tracks = Object.fromEntries(Object.entries(names).map(([id, value]) => [id, {
+    id, ...value, notes: [], muted: false, solo: false,
+  }])) as BeatData['tracks'];
+  return {
+    config,
+    recookCounts: {},
+    tracks,
+    barStructure: Array.from({ length: 8 }, (_, barIndex) => ({ barIndex, role: 'A' as const, description: 'Restoring cookup' })),
+  };
 }

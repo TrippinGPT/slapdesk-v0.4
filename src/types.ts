@@ -116,9 +116,40 @@ export interface ReferenceDNA {
 export interface SampleKit {
   kick?: AudioBuffer;
   snare?: AudioBuffer;
+  clap?: AudioBuffer;
   closedHat?: AudioBuffer;
   openHat?: AudioBuffer;
+  percussion?: AudioBuffer;
   bass808?: AudioBuffer;
+}
+
+export type StudioKitLane = 'kick' | 'snare' | 'clap' | 'closedHat' | 'openHat' | 'percussion' | 'bass808';
+
+/** Serializable reference and import metadata; audio binary stays in IndexedDB. */
+export interface StudioKitAssignment {
+  id: string;
+  lane: StudioKitLane;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  durationSeconds: number;
+  rootMidi?: number;
+  persistenceKey: string;
+  importedAt: string;
+}
+
+export interface StudioKit {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  assignments: Partial<Record<StudioKitLane, StudioKitAssignment>>;
+}
+
+export interface StudioKitLibrary {
+  kits: StudioKit[];
+  selectedKitId: string | null;
+  defaultKitId: string | null;
 }
 
 export interface SampleKitNames {

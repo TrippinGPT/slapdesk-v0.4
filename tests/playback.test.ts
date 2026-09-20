@@ -98,9 +98,10 @@ test('mute, solo, disabled bars and conflicting mute+solo follow mixer priority'
 
 class Param {
   value = 0;
-  setValueAtTime(value: number) { this.value = value; }
-  exponentialRampToValueAtTime(value: number) { this.value = value; }
-  linearRampToValueAtTime(value: number) { this.value = value; }
+  events: { type: string; value: number; time: number }[] = [];
+  setValueAtTime(value: number, time = 0) { this.value = value; this.events.push({ type: 'set', value, time }); }
+  exponentialRampToValueAtTime(value: number, time = 0) { this.value = value; this.events.push({ type: 'exp', value, time }); }
+  linearRampToValueAtTime(value: number, time = 0) { this.value = value; this.events.push({ type: 'linear', value, time }); }
 }
 class Node {
   connections: Node[] = [];
@@ -109,9 +110,10 @@ class Node {
   type = ''; buffer: any; curve: any; oversample = '';
   onended: (() => void) | null = null;
   stopCalls = 0;
+  stopTimes: number[] = [];
   connect(node: Node) { this.connections.push(node); }
   start() {}
-  stop() { this.stopCalls++; }
+  stop(time?: number) { this.stopCalls++; if (time !== undefined) this.stopTimes.push(time); }
   disconnect() {}
 }
 class FakeAudioContext {
@@ -144,9 +146,11 @@ test('Web Audio routes through persistent panners and cancels stale transport wo
   for (const [index, id] of trackIds.entries()) beat.tracks[id].pan = index / 2 - 1;
   beat.tracks.melody.pan = -1;
   beat.tracks.kick.notes = [{ step: 0, bar: 0, stepInBar: 0, pitch: 36, duration: 1, velocity: 100 }];
+  audioEngine.setMasterVolume(0.63);
   audioEngine.setBeatData(beat);
   audioEngine.previewInstrument('melody');
   const context = FakeAudioContext.instance;
+  assert.equal((audioEngine as any).masterGain.gain.value, 0.63, 'restored master volume is applied when AudioContext initializes later');
   const melodyPanner = context.panners[0];
   assert.equal(melodyPanner.pan.value, -1);
   assert.equal(melodyPanner.connections.length, 1, 'panner routes to the shared compressor');
@@ -202,6 +206,38 @@ test('Web Audio routes through persistent panners and cancels stale transport wo
   audioEngine.stop();
   assert.equal(pendingTimers.size, 0, 'stop clears scheduler and playhead timers');
   assert.equal(FakeAudioContext.created, 1, 'the singleton AudioContext is reused');
+
+  const bassBuffer = {} as AudioBuffer;
+  audioEngine.setStudioSample('bass808', 'bass-test-id', bassBuffer, 36);
+  beat.config.bpm = 120;
+  beat.tracks.bass808.pan = -0.4;
+  beat.tracks.bass808.volume = 0.5;
+  beat.tracks.bass808.notes = [{ step: 0, bar: 0, stepInBar: 0, pitch: 48, duration: 2, velocity: 80, glideTo: 60 }];
+  audioEngine.setBeatData(beat);
+  audioEngine.play(beat);
+  const bassSource = context.sources.at(-1)!;
+  assert.equal(bassSource.buffer, bassBuffer, 'assigned 808 sample replaces its synthesized fallback');
+  assert.equal(bassSource.playbackRate.value, 4, 'glide ends two octaves above C2 root at the right rate');
+  assert.ok(Math.abs((bassSource.stopTimes.at(-1)! - (context.currentTime + 0.05)) - 0.255) < 1e-9,
+    'sample 808 is stopped at the generated two-step duration plus the short release tail');
+  const bassEnvelope = bassSource.connections[0];
+  assert.ok(bassEnvelope.gain.events.some(event => Math.abs(event.value - (80 / 127) * 0.5) < 1e-9),
+    'generated velocity and track volume reach the sample envelope');
+  const bassPanner = bassEnvelope.connections[0];
+  assert.equal(bassPanner.pan.value, -0.4, 'imported sample keeps the track pan route');
+  audioEngine.stop();
+  bassSource.onended?.();
+
+  audioEngine.auditionStudioLane('bass808', 36);
+  const firstPreview = context.sources.at(-1)!;
+  audioEngine.auditionStudioLane('bass808', 36);
+  const secondPreview = context.sources.at(-1)!;
+  assert.ok(firstPreview.stopCalls > 0, 'retrigger stops the previous Studio Kit audition');
+  assert.notEqual(firstPreview, secondPreview);
+  assert.equal(audioEngine.getIsPlaying(), false, 'audition does not start transport');
+  audioEngine.stopStudioAudition();
+  firstPreview.onended?.();
+  secondPreview.onended?.();
 });
 
 test('pan and volume survive every targeted recook', () => {

@@ -3,15 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BeatData, NoteEvent, ReferenceDNA, SampleKit, TrackType } from '../types';
+import { BeatData, NoteEvent, ReferenceDNA, SampleKit, StudioKitLane, TrackType } from '../types';
 import { midiToFrequency } from './scales';
 import { MIDI_PERC } from './drumsEngine';
 import { clampTrackPan, isTrackAudible, trackGain } from './playbackMix';
 import { swingOffsetSeconds } from './playbackTiming';
+import { DEFAULT_808_ROOT_MIDI, samplePlaybackRate } from './samplePitch';
 
 class AudioEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
+  private masterVolume = 0.85;
   private compressor: DynamicsCompressorNode | null = null;
   private isPlaying: boolean = false;
   private currentStep: number = 0; // 0..127
@@ -23,6 +25,11 @@ class AudioEngine {
   private nextStepTime: number = 0;
   private currentBeatData: BeatData | null = null;
   private customKit: SampleKit = {};
+  private studioSampleBuffers = new Map<string, AudioBuffer>();
+  private studioLaneAssetIds: Partial<Record<StudioKitLane, string>> = {};
+  private studio808RootMidi = DEFAULT_808_ROOT_MIDI;
+  private previewSources = new Set<AudioScheduledSourceNode>();
+  private capturingPreview = false;
   private trackPanners = new Map<TrackType, StereoPannerNode>();
   private onStepCallback: ((step: number, bar: number) => void) | null = null;
   private onPlayStateChange: ((playing: boolean) => void) | null = null;
@@ -41,7 +48,7 @@ class AudioEngine {
       this.compressor.release.setValueAtTime(0.15, this.ctx.currentTime);
 
       this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.setValueAtTime(0.85, this.ctx.currentTime);
+      this.masterGain.gain.setValueAtTime(this.masterVolume, this.ctx.currentTime);
 
       this.compressor.connect(this.masterGain);
       this.masterGain.connect(this.ctx.destination);
@@ -60,8 +67,9 @@ class AudioEngine {
   }
 
   public setMasterVolume(vol: number) {
+    this.masterVolume = Math.max(0, Math.min(1.5, vol));
     if (this.ctx && this.masterGain) {
-      this.masterGain.gain.setValueAtTime(Math.max(0, Math.min(1.5, vol)), this.ctx.currentTime);
+      this.masterGain.gain.setValueAtTime(this.masterVolume, this.ctx.currentTime);
     }
   }
 
@@ -92,15 +100,91 @@ class AudioEngine {
   }
 
   public setCustomSample(type: keyof SampleKit, buffer: AudioBuffer | undefined) {
-    this.customKit[type] = buffer;
+    if (buffer) this.customKit[type] = buffer;
+    else delete this.customKit[type];
+    delete this.studioLaneAssetIds[type];
   }
 
   public clearCustomSamples() {
     this.customKit = {};
+    this.studioLaneAssetIds = {};
+    this.studioSampleBuffers.clear();
+    this.studio808RootMidi = DEFAULT_808_ROOT_MIDI;
   }
 
   public getCustomSamples(): SampleKit {
     return this.customKit;
+  }
+
+  public clearStudioSamples() {
+    this.customKit = {};
+    this.studioLaneAssetIds = {};
+    this.studio808RootMidi = DEFAULT_808_ROOT_MIDI;
+    this.stopStudioAudition();
+  }
+
+  public setStudioSample(lane: StudioKitLane, id: string | undefined, buffer: AudioBuffer | undefined, rootMidi = DEFAULT_808_ROOT_MIDI) {
+    if (!id || !buffer) {
+      delete this.studioLaneAssetIds[lane];
+      delete this.customKit[lane];
+      if (lane === 'bass808') this.studio808RootMidi = DEFAULT_808_ROOT_MIDI;
+      this.stopStudioAudition();
+      return;
+    }
+    if (this.studioLaneAssetIds[lane] !== id) this.stopStudioAudition();
+    const cached = this.studioSampleBuffers.get(id) ?? buffer;
+    this.studioSampleBuffers.set(id, cached);
+    this.studioLaneAssetIds[lane] = id;
+    this.customKit[lane] = cached;
+    if (lane === 'bass808') this.studio808RootMidi = Math.max(0, Math.min(127, Math.round(rootMidi)));
+  }
+
+  public getStudioSampleBuffer(id: string): AudioBuffer | undefined {
+    return this.studioSampleBuffers.get(id);
+  }
+
+  public retainStudioSampleIds(ids: ReadonlySet<string>) {
+    for (const id of this.studioSampleBuffers.keys()) {
+      if (ids.has(id)) continue;
+      this.studioSampleBuffers.delete(id);
+      for (const lane of Object.keys(this.studioLaneAssetIds) as StudioKitLane[]) {
+        if (this.studioLaneAssetIds[lane] === id) {
+          delete this.studioLaneAssetIds[lane];
+          delete this.customKit[lane];
+        }
+      }
+    }
+  }
+
+  public auditionStudioLane(lane: StudioKitLane, rootMidi = DEFAULT_808_ROOT_MIDI) {
+    this.init();
+    if (!this.ctx) return;
+    this.stopStudioAudition();
+    this.capturingPreview = true;
+    const time = this.ctx.currentTime + 0.01;
+    try {
+      switch (lane) {
+        case 'kick': this.playKick(time, 0.95, 'kick'); break;
+        case 'snare': this.playSnare(time, 0.9, 'snare'); break;
+        case 'clap': this.playClap(time, 0.9, 'snare'); break;
+        case 'closedHat': this.playHat(time, false, 0.85, 'hihat'); break;
+        case 'openHat': this.playHat(time, true, 0.85, 'hihat'); break;
+        case 'percussion':
+          if (this.customKit.percussion) this.playBuffer(this.customKit.percussion, time, 0.85, 1, 'hihat');
+          else this.playHat(time, false, 0.85, 'hihat');
+          break;
+        case 'bass808': this.play808(time, rootMidi, 0.6, 0.95, undefined, 'bass808'); break;
+      }
+    } finally {
+      this.capturingPreview = false;
+    }
+  }
+
+  public stopStudioAudition() {
+    for (const source of this.previewSources) {
+      try { source.stop(); } catch { /* Preview may have ended already. */ }
+    }
+    this.previewSources.clear();
   }
 
   public play(beatData: BeatData, startStep = 0) {
@@ -234,6 +318,8 @@ class AudioEngine {
         const vel = (n.velocity / 127) * gain;
         if (n.pitch === MIDI_PERC.CLAP) {
           this.playClap(time, vel, 'snare');
+        } else if (n.pitch === MIDI_PERC.RIM_SHOT && this.customKit.percussion) {
+          this.playBuffer(this.customKit.percussion, time, vel, 1, 'snare');
         } else {
           this.playSnare(time, vel, 'snare');
         }
@@ -245,8 +331,11 @@ class AudioEngine {
       const gain = getTrackGain('hihat');
       const hatHits = tracks.hihat.notes.filter(n => n.step === step);
       hatHits.forEach(n => {
-        const isOpen = n.pitch === MIDI_PERC.OPEN_HAT;
-        this.playHat(swungTime('hihat'), isOpen, (n.velocity / 127) * gain, 'hihat');
+        const velocity = (n.velocity / 127) * gain;
+        if (n.pitch === MIDI_PERC.OPEN_HAT) this.playHat(swungTime('hihat'), true, velocity, 'hihat');
+        else if (n.pitch === MIDI_PERC.CLOSED_HAT) this.playHat(swungTime('hihat'), false, velocity, 'hihat');
+        else if (this.customKit.percussion) this.playBuffer(this.customKit.percussion, swungTime('hihat'), velocity, 1, 'hihat');
+        else this.playHat(swungTime('hihat'), false, velocity, 'hihat');
       });
     }
 
@@ -315,8 +404,9 @@ class AudioEngine {
   public playClap(time: number, velocity = 0.9, track: TrackType = 'snare') {
     if (!this.ctx || !this.compressor) return;
 
-    if (this.customKit.snare) {
-      this.playBuffer(this.customKit.snare, time, velocity * 0.95, 1, track);
+    const clapBuffer = this.customKit.clap ?? this.customKit.snare;
+    if (clapBuffer) {
+      this.playBuffer(clapBuffer, time, velocity * 0.95, 1, track);
       return;
     }
 
@@ -421,11 +511,11 @@ class AudioEngine {
     if (!this.ctx || !this.compressor) return;
 
     if (this.customKit.bass808) {
-      // Pitched playback of custom 808 sample
-      const baseFreq = 440 * Math.pow(2, (24 - 69) / 12); // Base C1
-      const targetFreq = midiToFrequency(midiPitch);
-      const rate = targetFreq / baseFreq;
-      this.playBuffer(this.customKit.bass808, time, velocity, rate, track);
+      const rootMidi = this.studio808RootMidi;
+      const rate = samplePlaybackRate(midiPitch, rootMidi);
+      this.playBuffer(this.customKit.bass808, time, velocity, rate, track, {
+        duration, glideToPitch, rootMidi,
+      });
       return;
     }
 
@@ -539,14 +629,40 @@ class AudioEngine {
     osc2.stop(time + safeDur + 0.05);
   }
 
-  private playBuffer(buffer: AudioBuffer, time: number, gainVal: number, playbackRate = 1.0, track: TrackType = 'kick') {
+  private playBuffer(
+    buffer: AudioBuffer,
+    time: number,
+    gainVal: number,
+    playbackRate = 1.0,
+    track: TrackType = 'kick',
+    options: { duration?: number; glideToPitch?: number; rootMidi?: number } = {}
+  ) {
     if (!this.ctx || !this.compressor) return;
     const src = this.ctx.createBufferSource();
     src.buffer = buffer;
     src.playbackRate.setValueAtTime(playbackRate, time);
 
     const gain = this.ctx.createGain();
-    gain.gain.setValueAtTime(gainVal, time);
+    if (options.duration !== undefined) {
+      const safeDuration = Math.max(0.025, options.duration);
+      const fadeIn = Math.min(0.005, safeDuration / 4);
+      const fadeOut = Math.min(0.02, safeDuration / 3);
+      const stopTime = time + safeDuration;
+      gain.gain.setValueAtTime(0, time);
+      gain.gain.linearRampToValueAtTime(gainVal, time + fadeIn);
+      if (options.glideToPitch !== undefined) {
+        const rootMidi = options.rootMidi ?? this.studio808RootMidi;
+        const glideStart = time + safeDuration * 0.35;
+        const glideEnd = time + safeDuration * 0.85;
+        src.playbackRate.setValueAtTime(playbackRate, glideStart);
+        src.playbackRate.exponentialRampToValueAtTime(samplePlaybackRate(options.glideToPitch, rootMidi), glideEnd);
+      }
+      gain.gain.setValueAtTime(gainVal, Math.max(time + fadeIn, stopTime - fadeOut));
+      gain.gain.exponentialRampToValueAtTime(0.0001, stopTime);
+      src.stop(stopTime + 0.005);
+    } else {
+      gain.gain.setValueAtTime(gainVal, time);
+    }
 
     src.connect(gain);
     gain.connect(this.getTrackPanner(track)!);
@@ -557,8 +673,10 @@ class AudioEngine {
 
   private releaseNodesWhenEnded(source: AudioScheduledSourceNode, ...nodes: AudioNode[]) {
     this.activeSources.add(source);
+    if (this.capturingPreview) this.previewSources.add(source);
     source.onended = () => {
       this.activeSources.delete(source);
+      this.previewSources.delete(source);
       nodes.forEach(node => node.disconnect());
     };
   }
@@ -693,11 +811,14 @@ class AudioEngine {
 
   // Normalizer: decodes buffer and returns a peak-normalized AudioBuffer
   public async decodeAndNormalizeSample(file: File): Promise<AudioBuffer> {
+    return this.decodeAndNormalizeSampleData(await file.arrayBuffer());
+  }
+
+  public async decodeAndNormalizeSampleData(arrayBuf: ArrayBuffer): Promise<AudioBuffer> {
     this.init();
     if (!this.ctx) throw new Error('Web Audio not initialized');
 
-    const arrayBuf = await file.arrayBuffer();
-    const rawBuffer = await this.ctx.decodeAudioData(arrayBuf);
+    const rawBuffer = await this.ctx.decodeAudioData(arrayBuf.slice(0));
 
     // Find peak
     let maxPeak = 0;
