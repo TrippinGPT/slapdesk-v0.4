@@ -1,0 +1,8 @@
+[
+  "src/engine/scales.ts",
+  "src/components/StudioKitModal.tsx",
+  "src/components/TestLabModal.tsx",
+  "src/components/ReferenceModeModal.tsx",
+  "src/components/TokenLabModal.tsx",
+  "src/components/CodeViewerModal.tsx"
+]

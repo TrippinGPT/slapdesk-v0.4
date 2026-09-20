@@ -1,0 +1,6 @@
+{
+  "name": "SlapDesk v0.4",
+  "description": "LMMS-style Web DAW for West Coast and Detroit slap production featuring Song-Editor timeline, Beat+Bassline step sequencer, Piano Roll, FX Mixer, 8-bar phrase memory, and multi-track MIDI export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
